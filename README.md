@@ -1,6 +1,6 @@
-# Garmin 18X USB GPS Follow Me for Google Earth
+# Garmin 18X USB GPS Tracker for Google Earth
 
-Provides real-time location in Google Earth. Does not create a path of where the GPS has been, only acts as a bridge between a Garmin 18X USB GPS and Google Earth
+Provides real-time location in Google Earth. Does not create a path of where the GPS has been; only acts as a bridge between a Garmin 18X USB GPS and Google Earth
 
 The application uses GPSBabel in the background to safely stream live Garmin PVT (Position, Velocity, Time) data, parses it, and launches an internal HTTP server. This server dynamically hosts a KML network link that allows Google Earth to actively track and "fly to" your live position seamlessly without any lag or port conflicts.
 
