@@ -267,6 +267,8 @@ class TrackingEngine:
         cmd = [gpsbabel_path, "-T", "-i", "garmin", "-f", "usb:",
                "-o", "nmea", "-F", "-"]
 
+        not_found_retries = 0  # Bug #6 fix: counts consecutive FileNotFoundError hits
+
         while not self._stop_evt.is_set():
             try:
                 self._gpsbabel = subprocess.Popen(
@@ -309,10 +311,22 @@ class TrackingEngine:
                 time.sleep(3)
 
             except FileNotFoundError:
+                not_found_retries += 1
+                if not_found_retries >= 3:
+                    # Give up — emit "crashed" with a specific message so the
+                    # GUI shows it instead of the generic "stopped unexpectedly"
+                    # text, then exit the thread cleanly without a second emit.
+                    self._put(
+                        "crashed",
+                        f"GPSBabel not found after {not_found_retries} attempts.\n"
+                        f"Path: {gpsbabel_path}\n"
+                        "Please check Settings."
+                    )
+                    return
                 self._put(
                     "error",
                     f"GPSBabel not found at:\n{gpsbabel_path}\n"
-                    "Check Settings."
+                    f"Check Settings. (Attempt {not_found_retries}/3)"
                 )
                 time.sleep(5)
             except Exception as e:
@@ -334,12 +348,16 @@ class TrackingEngine:
         port = self.cfg.get("port", 8080)
         vehicle_name = self.cfg.get("vehicle_name", "My Vehicle")
 
-        # Inject config into the handler class
-        _KMLHandler.vehicle_name = vehicle_name
-        _KMLHandler._msg_queue   = self.msg_queue
+        # Create a per-session handler subclass so class-level attributes
+        # are never shared or clobbered between concurrent TrackingEngine
+        # instances (e.g. during a fast stop/start). Bug #1 fix.
+        class _SessionKMLHandler(_KMLHandler):
+            pass
+        _SessionKMLHandler.vehicle_name = vehicle_name
+        _SessionKMLHandler._msg_queue   = self.msg_queue
 
         try:
-            self._server = _ReusableHTTPServer(("localhost", port), _KMLHandler)
+            self._server = _ReusableHTTPServer(("localhost", port), _SessionKMLHandler)
             # serve_forever loops until shutdown() is called from stop()
             self._server.serve_forever()
         except OSError as e:
@@ -360,6 +378,7 @@ class GPSTrackerApp:
         self.msg_queue  = queue.Queue()     # Engine → GUI messages
         self.session_id = 0                 # Invalidates stale queue messages
         self._ge_connected = False          # True after first GE poll — suppresses repeat messages
+        self._closing      = False          # True when the window-close button was clicked
 
         # Load config on startup
         self.cfg = config.load()
@@ -618,6 +637,9 @@ class GPSTrackerApp:
         threading.Thread(target=do_stop, daemon=True).start()
 
     def _after_stop(self):
+        if self._closing:
+            self.root.destroy()
+            return
         self.log_label.config(text="Tracking stopped.", fg="#aaaaaa")
         self.start_btn.config(state="normal", bg="#1a7a4a")
 
@@ -669,11 +691,14 @@ class GPSTrackerApp:
                     # genuine unexpected failure. Reset the UI.
                     # Bug 4 fix: renamed from "stopped" to "crashed" so normal
                     # shutdown no longer triggers this branch.
+                    # Bug #6 fix: value now carries an optional custom message
+                    # (e.g. from the FileNotFoundError give-up path) so the
+                    # label shows the real reason instead of the generic text.
                     if self.engine is not None:
                         self.engine = None
                         self.set_status("stopped", "Not running")
                         self.log_label.config(
-                            text="Tracking stopped unexpectedly.",
+                            text=value or "Tracking stopped unexpectedly.",
                             fg="#c0392b"
                         )
                         self.start_btn.config(state="normal", bg="#1a7a4a")
@@ -728,8 +753,13 @@ class GPSTrackerApp:
         self.status_label.config(text=text, fg=colors.get(state, "#888888"))
 
     def on_close(self):
-        self.stop_tracking()
-        self.root.after(800, self.root.destroy)
+        # Bug #3 fix: the old 800ms timer races with the 10s engine stop timeout.
+        # Instead, set a flag and let _after_stop call root.destroy() when done.
+        self._closing = True
+        if self.engine is None:
+            self.root.destroy()   # Nothing running — safe to destroy immediately.
+        else:
+            self.stop_tracking()  # Background thread will call _after_stop → destroy.
 
 
 # ============================================================
