@@ -16,7 +16,22 @@ import sys
 import os
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
+import ctypes
+
 import config
+
+# ============================================================
+#  DPI AWARENESS
+#  Prevents Windows from upscaling the window on high-DPI
+#  displays, which causes a blurry/fuzzy appearance.
+# ============================================================
+try:
+    ctypes.windll.shcore.SetProcessDpiAwareness(2)  # Per-monitor DPI aware
+except Exception:
+    try:
+        ctypes.windll.user32.SetProcessDPIAware()   # Fallback for older Windows
+    except Exception:
+        pass
 
 # ============================================================
 #  SHARED GPS STATE
@@ -383,9 +398,21 @@ class GPSTrackerApp:
         # Load config on startup
         self.cfg = config.load()
 
+        # ---- DPI scaling ----
+        # With DPI awareness enabled, tkinter works in true physical pixels.
+        # We detect the scale factor and multiply window dimensions so the
+        # layout stays the same physical size on all displays.
+        try:
+            dpi_scale = self.root.winfo_fpixels('1i') / 96.0
+        except Exception:
+            dpi_scale = 1.0
+        self._dpi_scale = dpi_scale
+
         # ---- Window ----
         self.root.title("GPS Tracker")
-        self.root.geometry("320x300")
+        w = int(320 * dpi_scale)
+        h = int(300 * dpi_scale)
+        self.root.geometry(f"{w}x{h}")
         self.root.resizable(False, False)
         self.root.configure(bg="#f5f5f5")
 
@@ -442,7 +469,7 @@ class GPSTrackerApp:
         # ---- Log line ----
         self.log_label = tk.Label(
             self.root, text="",
-            font=("Segoe UI", 9), fg="#aaaaaa", bg="#f5f5f5", wraplength=290
+            font=("Segoe UI", 9), fg="#aaaaaa", bg="#f5f5f5", wraplength=int(290 * dpi_scale)
         )
         self.log_label.pack(pady=(2, 0))
 
@@ -459,7 +486,7 @@ class GPSTrackerApp:
             relief="flat", width=14, height=2, cursor="hand2",
             command=self.start_tracking
         )
-        self.start_btn.grid(row=0, column=0, padx=8)
+        self.start_btn.grid(row=0, column=0, padx=(0, 4))
 
         self.stop_btn = tk.Button(
             btn_frame,
@@ -471,7 +498,7 @@ class GPSTrackerApp:
             state="disabled",
             command=self.stop_tracking
         )
-        self.stop_btn.grid(row=0, column=1, padx=8)
+        self.stop_btn.grid(row=0, column=1, padx=(4, 0))
 
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
         self._poll_queue()
@@ -489,7 +516,7 @@ class GPSTrackerApp:
 
         win = tk.Toplevel(self.root)
         win.title("Settings")
-        win.geometry("400x240")
+        win.geometry(f"{int(400 * self._dpi_scale)}x{int(240 * self._dpi_scale)}")
         win.resizable(False, False)
         win.configure(bg="#f5f5f5")
         win.grab_set()
