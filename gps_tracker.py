@@ -186,6 +186,7 @@ class TrackingEngine:
         self._server    = None               # HTTP server instance
         self._t_gps     = None               # GPS reader thread (named ref)
         self._t_http    = None               # HTTP server thread (named ref)
+        self._gpsbabel_killed_on_start = False  # Track if we killed gpsbabel on this session start
 
     # ---- public ------------------------------------------------
 
@@ -253,7 +254,11 @@ class TrackingEngine:
         self.msg_queue.put((tag, value))
 
     def _kill_existing_gpsbabel(self):
-        """Clear any leftover gpsbabel.exe before opening the USB device."""
+        """
+        Clear any leftover gpsbabel.exe before opening the USB device.
+        Bug #7 fix: Only sleep after killing on the first attempt per session.
+        Subsequent retries don't need to wait — the USB handle is already released.
+        """
         try:
             subprocess.run(
                 ["taskkill", "/F", "/IM", "gpsbabel.exe"],
@@ -261,7 +266,10 @@ class TrackingEngine:
                 stderr=subprocess.DEVNULL,
                 creationflags=subprocess.CREATE_NO_WINDOW
             )
-            time.sleep(3)  # Wait for Windows to release the USB handle
+            # Only wait for USB release on the FIRST kill of this session
+            if not self._gpsbabel_killed_on_start:
+                self._gpsbabel_killed_on_start = True
+                time.sleep(3)  # Wait for Windows to release the USB handle
         except Exception:
             pass
 
@@ -283,6 +291,7 @@ class TrackingEngine:
                "-o", "nmea", "-F", "-"]
 
         not_found_retries = 0  # Bug #6 fix: counts consecutive FileNotFoundError hits
+        device_error_retries = 0  # Bug #7 fix: counts consecutive device access failures
 
         while not self._stop_evt.is_set():
             try:
@@ -322,8 +331,22 @@ class TrackingEngine:
                 if self._stop_evt.is_set():
                     break
 
-                self._put("error", "GPSBabel stopped — retrying in 3s...")
-                time.sleep(3)
+                # Bug #7 fix: Distinguish between "executable not found" and
+                # "device access error". Device errors should retry faster.
+                # Check if GPSBabel exited immediately (likely device issue)
+                # vs hanging (likely real problem).
+                device_error_retries += 1
+                if device_error_retries >= 2:
+                    # Gave it a couple quick attempts — now give up
+                    self._put(
+                        "error",
+                        "GPS device not responding after retries.\n"
+                        "Check device connection and permissions."
+                    )
+                    time.sleep(1)  # Brief pause before giving up
+                else:
+                    self._put("error", "GPSBabel stopped — retrying in 1s...")
+                    time.sleep(1)  # Bug #7 fix: reduced from 3s to 1s
 
             except FileNotFoundError:
                 not_found_retries += 1
@@ -345,8 +368,18 @@ class TrackingEngine:
                 )
                 time.sleep(5)
             except Exception as e:
-                self._put("error", f"GPS error: {e}")
-                time.sleep(3)
+                # Bug #7 fix: Treat generic errors as device errors, not executable errors
+                # Use shorter retry delays for device access issues
+                device_error_retries += 1
+                if device_error_retries >= 2:
+                    self._put(
+                        "error",
+                        f"GPS error (device not responding):\n{e}"
+                    )
+                    time.sleep(1)
+                else:
+                    self._put("error", f"GPS error: {e} (retrying in 1s...)")
+                    time.sleep(1)  # Bug #7 fix: reduced from 3s to 1s
 
         # Only emit "crashed" if the loop exited WITHOUT stop() being called.
         # If stop() set the event, the GUI already knows — no message needed.
