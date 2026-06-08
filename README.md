@@ -19,9 +19,11 @@ To run this project, you will need:
 4. **Google Earth Pro**
 
 ## How to Run
-Simply run the main tracking script:
-
+1. Download `gps_tracker.py` and `config.py` and save them to the same folder.
+2. Open a terminal in that folder and run:
+```bash
 python gps_tracker.py
+```
 
 ## GUI Notes
 The Open in Google Earth button will only become avalaible once tracking is active. Clicking this will place a .kml file on the users Desktop with the network link preconfigured. Ensure Google Earth is the default app for .kml files and it will automatically launch. 
