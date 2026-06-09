@@ -17,6 +17,7 @@ import os
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
 import ctypes
+import html
 
 import config
 
@@ -89,7 +90,7 @@ def _build_kml(vehicle_name):
       <LabelStyle><scale>1.0</scale></LabelStyle>
     </Style>
     <Placemark>
-      <name>{vehicle_name}</name>
+      <name>{html.escape(vehicle_name)}</name>
       <styleUrl>#vehicle</styleUrl>
       <Point>
         <altitudeMode>clampToGround</altitudeMode>
@@ -173,9 +174,9 @@ class TrackingEngine:
         ("status", "waiting")
         ("status", "running")
         ("position", "00.00000, 00.00000  Alt: 0000.0m")
-        ("http",   None)
-        ("error",  "message text")
-        ("stopped", None)
+        ("http",    None)
+        ("error",   "message text")
+        ("crashed", "optional message or None")
     """
 
     def __init__(self, cfg, msg_queue):
@@ -186,7 +187,6 @@ class TrackingEngine:
         self._server    = None               # HTTP server instance
         self._t_gps     = None               # GPS reader thread (named ref)
         self._t_http    = None               # HTTP server thread (named ref)
-        self._gpsbabel_killed_on_start = False  # Track if we killed gpsbabel on this session start
 
     # ---- public ------------------------------------------------
 
@@ -256,20 +256,19 @@ class TrackingEngine:
     def _kill_existing_gpsbabel(self):
         """
         Clear any leftover gpsbabel.exe before opening the USB device.
-        Bug #7 fix: Only sleep after killing on the first attempt per session.
-        Subsequent retries don't need to wait — the USB handle is already released.
+        Only sleeps if taskkill actually found and killed a process (returncode 0).
+        On a clean restart with no orphaned GPSBabel the sleep is skipped entirely.
         """
         try:
-            subprocess.run(
+            result = subprocess.run(
                 ["taskkill", "/F", "/IM", "gpsbabel.exe"],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 creationflags=subprocess.CREATE_NO_WINDOW
             )
-            # Only wait for USB release on the FIRST kill of this session
-            if not self._gpsbabel_killed_on_start:
-                self._gpsbabel_killed_on_start = True
-                time.sleep(3)  # Wait for Windows to release the USB handle
+            if result.returncode == 0:
+                # Something was running — wait for Windows to release the USB handle
+                time.sleep(3)
         except Exception:
             pass
 
@@ -319,6 +318,7 @@ class TrackingEngine:
                         result = _parse_gpgga(line)
                         if result:
                             _set_position(*result)
+                            device_error_retries = 0  # Connected and receiving — reset failure counter
                             self._put(
                                 "position",
                                 f"{result[0]:.5f}, {result[1]:.5f}"
@@ -331,22 +331,23 @@ class TrackingEngine:
                 if self._stop_evt.is_set():
                     break
 
-                # Bug #7 fix: Distinguish between "executable not found" and
-                # "device access error". Device errors should retry faster.
-                # Check if GPSBabel exited immediately (likely device issue)
-                # vs hanging (likely real problem).
+                # Distinguish device-access errors from executable errors.
+                # Give up after 3 consecutive failures so the loop doesn't
+                # retry forever — emit "crashed" and return, just like the
+                # FileNotFoundError path does.
                 device_error_retries += 1
-                if device_error_retries >= 2:
-                    # Gave it a couple quick attempts — now give up
+                if device_error_retries >= 3:
                     self._put(
-                        "error",
-                        "GPS device not responding after retries.\n"
-                        "Check device connection and permissions."
+                        "crashed",
+                        "GPS device not accessible after 3 attempts.\n"
+                        "Check device connection and try again."
                     )
-                    time.sleep(1)  # Brief pause before giving up
-                else:
-                    self._put("error", "GPSBabel stopped — retrying in 1s...")
-                    time.sleep(1)  # Bug #7 fix: reduced from 3s to 1s
+                    return
+                self._put(
+                    "error",
+                    f"GPSBabel stopped — retrying in 1s... ({device_error_retries}/3)"
+                )
+                time.sleep(1)
 
             except FileNotFoundError:
                 not_found_retries += 1
@@ -368,18 +369,21 @@ class TrackingEngine:
                 )
                 time.sleep(5)
             except Exception as e:
-                # Bug #7 fix: Treat generic errors as device errors, not executable errors
-                # Use shorter retry delays for device access issues
+                # Generic errors (e.g. Windows device-access failures) are
+                # treated as device errors. Give up after 3 attempts and emit
+                # "crashed" so the GUI resets — same pattern as FileNotFoundError.
                 device_error_retries += 1
-                if device_error_retries >= 2:
+                if device_error_retries >= 3:
                     self._put(
-                        "error",
-                        f"GPS error (device not responding):\n{e}"
+                        "crashed",
+                        f"GPS device not accessible after 3 attempts:\n{e}"
                     )
-                    time.sleep(1)
-                else:
-                    self._put("error", f"GPS error: {e} (retrying in 1s...)")
-                    time.sleep(1)  # Bug #7 fix: reduced from 3s to 1s
+                    return
+                self._put(
+                    "error",
+                    f"GPS error: {e} — retrying in 1s... ({device_error_retries}/3)"
+                )
+                time.sleep(1)
 
         # Only emit "crashed" if the loop exited WITHOUT stop() being called.
         # If stop() set the event, the GUI already knows — no message needed.
