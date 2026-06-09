@@ -16,7 +16,8 @@ To run this project, you will need:
 1. **Garmin 18X USB GPS:** This application is purpose built for this device and may not work with other GPS hardware.
 2. **Python 3.x**
 3. **GPSBabel** (PATH can be updated in the GUI settings menu.)
-4. **Google Earth Pro**
+4. **Garmin Express** Does not need to be running in background; Only required for GPS drivers. Run program once and open Device Manager, look inside Garmin Devices for Garmin USB GPS. Recommended driver version 2.3.1.
+5. **Google Earth Pro**
 
 ## How to Run
 1. Download `gps_tracker.py` and `config.py` and save them to the same folder.
