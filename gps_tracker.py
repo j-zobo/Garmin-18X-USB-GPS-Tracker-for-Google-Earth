@@ -12,7 +12,6 @@ import subprocess
 import threading
 import queue
 import time
-import sys
 import os
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
@@ -112,6 +111,10 @@ class _KMLHandler(BaseHTTPRequestHandler):
     vehicle_name = "My Vehicle"
 
     def do_GET(self):
+        if self.path.split("?")[0] not in ("/", "/position.kml"):
+            self.send_response(404)
+            self.end_headers()
+            return
         kml = _build_kml(self.__class__.vehicle_name)
         encoded = kml.encode("utf-8")
         self.send_response(200)
@@ -233,13 +236,13 @@ class TrackingEngine:
         if self._server is not None:
             try:
                 self._server.shutdown()   # Stops serve_forever() loop
-                self._server.server_close()  # Releases the socket — Bug 1 fix
+                self._server.server_close()  # Releases the socket so the port is reusable immediately
             except Exception:
                 pass
             self._server = None
 
         # Wait for both threads to fully exit (timeout so stop() never hangs)
-        # Bug 3 fix: _threads list replaced with named refs so we can join them
+        # Named thread refs allow each to be joined independently with a timeout
         if self._t_gps is not None:
             self._t_gps.join(timeout=5)
             self._t_gps = None
@@ -289,8 +292,8 @@ class TrackingEngine:
         cmd = [gpsbabel_path, "-T", "-i", "garmin", "-f", "usb:",
                "-o", "nmea", "-F", "-"]
 
-        not_found_retries = 0  # Bug #6 fix: counts consecutive FileNotFoundError hits
-        device_error_retries = 0  # Bug #7 fix: counts consecutive device access failures
+        not_found_retries = 0    # Counts consecutive "executable not found" failures
+        device_error_retries = 0 # Counts consecutive device-access failures
 
         while not self._stop_evt.is_set():
             try:
@@ -302,9 +305,9 @@ class TrackingEngine:
                     creationflags=subprocess.CREATE_NO_WINDOW
                 )
 
-                # Bug 2 fix: don't use "for line in stdout" — it blocks
-                # forever if GPSBabel hangs. Instead read with a timeout
-                # loop so _stop_evt can interrupt it reliably.
+                # readline() is used instead of "for line in stdout" because
+                # the latter blocks forever if GPSBabel hangs. Terminating
+                # GPSBabel closes the pipe, which unblocks readline() reliably.
                 while not self._stop_evt.is_set():
                     # readline() still blocks but GPSBabel termination
                     # (done in stop()) closes the pipe, which unblocks it.
@@ -387,8 +390,6 @@ class TrackingEngine:
 
         # Only emit "crashed" if the loop exited WITHOUT stop() being called.
         # If stop() set the event, the GUI already knows — no message needed.
-        # Bug 4 fix: was always emitting "stopped" which caused a race where
-        # a normal shutdown could trigger the "stopped unexpectedly" UI state.
         if not self._stop_evt.is_set():
             self._put("crashed", None)
 
@@ -401,8 +402,8 @@ class TrackingEngine:
         vehicle_name = self.cfg.get("vehicle_name", "My Vehicle")
 
         # Create a per-session handler subclass so class-level attributes
-        # are never shared or clobbered between concurrent TrackingEngine
-        # instances (e.g. during a fast stop/start). Bug #1 fix.
+        # (vehicle_name, _msg_queue) are never shared between concurrent
+        # TrackingEngine instances during a fast stop/start.
         class _SessionKMLHandler(_KMLHandler):
             pass
         _SessionKMLHandler.vehicle_name = vehicle_name
@@ -454,7 +455,7 @@ class GPSTrackerApp:
         self.root.configure(bg="#f5f5f5")
 
         # ---- Title bar ----
-        title_frame = tk.Frame(self.root, bg="#1a1a2e", height=56)
+        title_frame = tk.Frame(self.root, bg="#1a1a2e", height=int(56 * dpi_scale))
         title_frame.pack(fill="x")
         title_frame.pack_propagate(False)
 
@@ -485,11 +486,11 @@ class GPSTrackerApp:
             relief="flat", cursor="arrow", state="disabled",
             command=self.generate_network_link
         )
-        self.link_btn.pack(side="bottom", pady=10)
+        self.link_btn.pack(side="bottom", pady=int(10 * dpi_scale))
 
         # ---- Status indicator ----
         status_frame = tk.Frame(self.root, bg="#f5f5f5")
-        status_frame.pack(pady=(20, 4))
+        status_frame.pack(pady=(int(20 * dpi_scale), int(4 * dpi_scale)))
 
         self.status_dot = tk.Label(
             status_frame, text="\u25cf",
@@ -508,11 +509,11 @@ class GPSTrackerApp:
             self.root, text="",
             font=("Segoe UI", 9), fg="#aaaaaa", bg="#f5f5f5", wraplength=int(290 * dpi_scale)
         )
-        self.log_label.pack(pady=(2, 0))
+        self.log_label.pack(pady=(int(2 * dpi_scale), 0))
 
         # ---- Start / Stop buttons ----
         btn_frame = tk.Frame(self.root, bg="#f5f5f5")
-        btn_frame.pack(pady=22)
+        btn_frame.pack(pady=int(22 * dpi_scale))
 
         self.start_btn = tk.Button(
             btn_frame,
@@ -752,12 +753,8 @@ class GPSTrackerApp:
 
                 elif tag == "crashed":
                     # GPS reader exited without stop() being called —
-                    # genuine unexpected failure. Reset the UI.
-                    # Bug 4 fix: renamed from "stopped" to "crashed" so normal
-                    # shutdown no longer triggers this branch.
-                    # Bug #6 fix: value now carries an optional custom message
-                    # (e.g. from the FileNotFoundError give-up path) so the
-                    # label shows the real reason instead of the generic text.
+                    # genuine unexpected failure. Value carries an optional
+                    # message (e.g. from the give-up path) for the log label.
                     if self.engine is not None:
                         self.engine = None
                         self.set_status("stopped", "Not running")
@@ -817,8 +814,8 @@ class GPSTrackerApp:
         self.status_label.config(text=text, fg=colors.get(state, "#888888"))
 
     def on_close(self):
-        # Bug #3 fix: the old 800ms timer races with the 10s engine stop timeout.
-        # Instead, set a flag and let _after_stop call root.destroy() when done.
+        # Setting _closing=True lets _after_stop call root.destroy() when
+        # the engine finishes shutting down, avoiding a race with the timeout.
         self._closing = True
         if self.engine is None:
             self.root.destroy()   # Nothing running — safe to destroy immediately.
